@@ -8,6 +8,9 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 from datetime import datetime
 from pymongo import MongoClient  # Import MongoClient for MongoDB connection
+import pandas as pd
+from sklearn.ensemble import IsolationForest  # Import IsolationForest for anomaly detection
+from anomaly_detection import train_model, monitor  # Import anomaly detection functions
 
 # Load environment variables from .env file
 load_dotenv()
@@ -43,9 +46,8 @@ def generate_keys():
         format=serialization.PublicFormat.SubjectPublicKeyInfo
     )
 
-    # Return keys 
+    # Return only the public key
     return jsonify({
-        'private_key': pem_private.decode('utf-8'),
         'public_key': pem_public.decode('utf-8')
     })
 
@@ -68,39 +70,38 @@ def authenticate():
     timestamp = datetime.utcnow().isoformat()
     
     if device_public_key is None:
-        # Update the record for failed attempt or insert a new one
         auth_attempts_collection.update_one(
-            {'device_id': device_id},  # Filter by device_id
+            {'device_id': device_id},
             {'$set': {
                 'timestamp': timestamp,
                 'device_id': device_id,
                 'status': 'failed',
+                'success': False,  # Set success to False
                 'message': 'Device not registered!'
             }},
-            upsert=True  # Insert if not exists
+            upsert=True
         )
         return jsonify({"message": "Device not registered!"}), 404 
-
+    
     if device_id in active_challenges:
         return jsonify({"message": "Challenge already issued for this device!"}), 400
     
     active_challenges[device_id] = challenge
 
-    # Update the record or insert a new one with the generated challenge
     auth_attempts_collection.update_one(
         {'device_id': device_id},
         {'$set': {
             'timestamp': timestamp,
             'device_id': device_id,
             'status': 'success',
+            'success': True,  # Set success to True
             'message': 'Challenge generated.',
             'challenge': base64.b64encode(challenge).decode()
         }},
-        upsert=True  # Insert if not exists
+        upsert=True
     )
     
     return jsonify({"challenge": base64.b64encode(challenge).decode()}), 200
-
 
 @app.route('/response', methods=['POST'])
 def response():
@@ -123,19 +124,63 @@ def response():
     # Remove the challenge once it's processed
     del active_challenges[device_id]
 
-    # Update the same document for the device_id with the successful response
+    # Assume success for now; adjust based on actual signature validation
+    success_status = True  # Implement actual signature validation logic here
+    
+    # Update the document for the device_id with the response
     auth_attempts_collection.update_one(
         {'device_id': device_id},
         {'$set': {
             'timestamp': timestamp,
             'device_id': device_id,
-            'status': 'success',  # You can change this based on signature validation
+            'status': 'success',
             'message': 'Success',
-            'signature': signature  # Store the signature if needed
+            'signature': signature,
+            'success': success_status
         }}
     )
+
+    # Train model with new data
+    train_model(auth_attempts_collection)
+
+    # Check for anomalies
+    if monitor({'device_id': device_id, 'success': success_status}):
+        return jsonify({"message": "Anomaly detected!"}), 200
     
     return jsonify({"message": "Success"}), 200
+
+# Route to detect anomalies
+@app.route('/detect-anomalies', methods=['GET'])
+def detect_anomalies():
+    # Fetch all data from MongoDB
+    data = list(auth_attempts_collection.find({}, {'_id': 0}))  # Exclude _id from results
+    df = pd.DataFrame(data)
+
+    # If no data was fetched, return a message
+    if len(df) == 0:
+        return jsonify({"message": "No data in the database."}), 400
+
+    # Convert/encode non-numeric fields
+    df['success'] = df['success'].astype(int)
+    df['device_id'] = pd.factorize(df['device_id'])[0]
+    df['status'] = pd.factorize(df['status'])[0]
+    df['message'] = pd.factorize(df['message'])[0]
+    df['challenge'] = pd.factorize(df['challenge'])[0]
+
+    # Check if there's enough data to train the model
+    if len(df) < 3:
+        return jsonify({"message": "Not enough data to detect anomalies."}), 400
+
+    # Prepare data for model training
+    X = df[['device_id', 'success', 'status', 'message', 'challenge']]
+
+    # Initialize and train the Isolation Forest model
+    global model
+    model = IsolationForest(contamination=0.1)
+    model.fit(X)
+
+    # Monitor for anomalies
+    return jsonify({"message": "Model trained successfully!"}), 200
 
 # Route to get authentication attempts log
 @app.route('/auth-attempts', methods=['GET'])
@@ -144,4 +189,4 @@ def get_auth_attempts():
     return jsonify(attempts), 200
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    app.run(debug=True) 
