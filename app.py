@@ -65,35 +65,42 @@ def authenticate():
     challenge = os.urandom(16)
     device_public_key = device_keys.get(device_id)
     
-    # Log authentication attempt
     timestamp = datetime.utcnow().isoformat()
     
     if device_public_key is None:
-        # Log failed attempt to MongoDB
-        auth_attempts_collection.insert_one({
-            'timestamp': timestamp,
-            'device_id': device_id,
-            'status': 'failed',
-            'message': 'Device not registered!'
-        })
+        # Update the record for failed attempt or insert a new one
+        auth_attempts_collection.update_one(
+            {'device_id': device_id},  # Filter by device_id
+            {'$set': {
+                'timestamp': timestamp,
+                'device_id': device_id,
+                'status': 'failed',
+                'message': 'Device not registered!'
+            }},
+            upsert=True  # Insert if not exists
+        )
         return jsonify({"message": "Device not registered!"}), 404 
 
-    # Check if we already have a challenge for this device
     if device_id in active_challenges:
         return jsonify({"message": "Challenge already issued for this device!"}), 400
     
-    # Store the challenge for the device
     active_challenges[device_id] = challenge
 
-    # Log successful attempt to MongoDB
-    auth_attempts_collection.insert_one({
-        'timestamp': timestamp,
-        'device_id': device_id,
-        'status': 'success',
-        'message': 'Challenge generated.'
-    })
+    # Update the record or insert a new one with the generated challenge
+    auth_attempts_collection.update_one(
+        {'device_id': device_id},
+        {'$set': {
+            'timestamp': timestamp,
+            'device_id': device_id,
+            'status': 'success',
+            'message': 'Challenge generated.',
+            'challenge': base64.b64encode(challenge).decode()
+        }},
+        upsert=True  # Insert if not exists
+    )
     
-    return jsonify({"challenge": base64.b64encode(challenge).decode()}), 200 
+    return jsonify({"challenge": base64.b64encode(challenge).decode()}), 200
+
 
 @app.route('/response', methods=['POST'])
 def response():
@@ -108,26 +115,27 @@ def response():
     if device_id is None or challenge is None or signature is None:
         return jsonify({"error": "Invalid input data"}), 400 
 
-    # Log response attempt
     timestamp = datetime.utcnow().isoformat()
 
-    # Check if there is an active challenge for the device
     if device_id not in active_challenges:
         return jsonify({"error": "No active challenge for this device."}), 400
 
-    # Here you can validate the signature to adjust the status
-    # For now, we'll log a success message as a placeholder
-    auth_attempts_collection.insert_one({
-        'timestamp': timestamp,
-        'device_id': device_id,
-        'status': 'success',  # You can change this based on signature validation
-        'message': 'Success'
-    })
-    
     # Remove the challenge once it's processed
     del active_challenges[device_id]
 
-    return jsonify({"message": "Success"}), 200 
+    # Update the same document for the device_id with the successful response
+    auth_attempts_collection.update_one(
+        {'device_id': device_id},
+        {'$set': {
+            'timestamp': timestamp,
+            'device_id': device_id,
+            'status': 'success',  # You can change this based on signature validation
+            'message': 'Success',
+            'signature': signature  # Store the signature if needed
+        }}
+    )
+    
+    return jsonify({"message": "Success"}), 200
 
 # Route to get authentication attempts log
 @app.route('/auth-attempts', methods=['GET'])
