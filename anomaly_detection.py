@@ -45,6 +45,16 @@ def monitor(new_attempt):
     
     attempt_df['device_id'] = pd.factorize(attempt_df['device_id'])[0]
 
+    # Log the input features
+    logging.info(f"Input features for prediction: {attempt_df.values}")
+
     prediction = model.predict(attempt_df)
     logging.info(f"Prediction for new attempt {new_attempt}: {prediction}")
+
+    # Log the decision-making process
+    if prediction[0] == -1:
+        logging.warning("Anomaly detected.")
+    else:
+        logging.info("Normal activity.")
+
     return prediction[0] == -1  # Anomaly is indicated by -1

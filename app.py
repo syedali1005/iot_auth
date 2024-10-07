@@ -16,7 +16,6 @@ from anomaly_detection import train_model, monitor
 from verification import verify_signature
 from generate_signature import generate_signature
 
-
 # Load environment variables from .env file
 load_dotenv()
 mongo_password = os.getenv('MONGO_DB_PASSWORD')
@@ -75,8 +74,6 @@ def generate_keys():
     except Exception as e:
         logging.error(f"Error generating keys: {str(e)}")
         return jsonify({"error": "Failed to generate keys."}), 500
-
-
 
 @app.route('/register', methods=['POST'])
 def register_device():
@@ -150,7 +147,6 @@ def authenticate():
         challenge_bytes = base64.b64decode(challenge_base64)
 
         # Use the generate_signature function to sign the challenge
-        from generate_signature import generate_signature
         signature = generate_signature(private_key, challenge_bytes)
 
         # Store the signature in the database
@@ -173,9 +169,6 @@ def authenticate():
     except Exception as e:
         logging.error(f"An error occurred during authentication: {str(e)}")
         return jsonify({"error": f"An error occurred during authentication: {str(e)}"}), 500
-
-
-
 
 @app.route('/response', methods=['POST'])
 def response():
@@ -227,66 +220,79 @@ def response():
     success_status = verify_signature(public_key_pem, signature_bytes, challenge_bytes)
     logging.info(f"Verification result for device {device_id}: {success_status}")
 
-    # Only store the authentication attempt if the signature is valid
-    if success_status:
+    # Check if the received challenge matches the active challenge
+    expected_challenge = active_challenges[device_id]
+    if challenge_bytes != expected_challenge:
+        logging.warning(f"Challenge mismatch for device {device_id}. Marking as anomaly.")
+        message = 'Anomaly Detected: Challenge mismatch detected.'
         auth_attempts_collection.update_one(
             {'device_id': device_id},
             {'$set': {
                 'timestamp': timestamp,
                 'device_id': device_id,
-                'status': 'success',
-                'message': 'Success',
+                'status': message,
+                'message': message,
+                'signature': signature,
+                'success': False
+            }}
+        )
+        return jsonify({"message": message}), 200
+
+    # Only store the authentication attempt if the signature is valid
+    if success_status:
+        message = 'Normal Activity: Success'
+        auth_attempts_collection.update_one(
+            {'device_id': device_id},
+            {'$set': {
+                'timestamp': timestamp,
+                'device_id': device_id,
+                'status': message,
+                'message': message,
                 'signature': signature,
                 'success': success_status
             }}
         )
         logging.info(f"Authentication attempt stored for device {device_id}.")
     else:
+        message = 'Anomaly Detected: Invalid signature.'
         logging.warning(f"Failed authentication attempt for device {device_id}. Invalid signature.")
+
+        auth_attempts_collection.update_one(
+            {'device_id': device_id},
+            {'$set': {
+                'timestamp': timestamp,
+                'device_id': device_id,
+                'status': message,
+                'message': message,
+                'signature': signature,
+                'success': False
+            }}
+        )
 
     # Train anomaly detection model
     train_model(auth_attempts_collection)
 
-    if monitor({'device_id': device_id, 'success': success_status}):
-        return jsonify({"message": "Normal Activity!"}), 200
+    return jsonify({"message": message}), 200
+
+
+
+@app.route('/train-model', methods=['POST'])
+def train_model_endpoint():
+    """Endpoint to train the anomaly detection model."""
+    result = train_model(auth_attempts_collection)
+    if result:
+        return jsonify({"message": "Model trained successfully!"}), 200
     else:
-        return jsonify({"message": "Anomaly Detected!"}), 200
+        return jsonify({"message": "Not enough data to train the model."}), 400
 
-
-
-
-@app.route('/detect-anomalies', methods=['GET'])
-def detect_anomalies():
-    data = list(auth_attempts_collection.find({}, {'_id': 0}))
-    df = pd.DataFrame(data)
-
-    if df.empty:
-        logging.warning("No data in the database for anomaly detection.")
-        return jsonify({"message": "No data in the database."}), 400
-
-    df['success'] = df['success'].astype(int)
-    df['device_id'] = pd.factorize(df['device_id'])[0]
-    df['status'] = pd.factorize(df['status'])[0]
-    df['message'] = pd.factorize(df['message'])[0]
-    df['challenge'] = pd.factorize(df['challenge'])[0]
-
-    if len(df) < 3:
-        logging.warning("Not enough data to detect anomalies.")
-        return jsonify({"message": "Not enough data to detect anomalies."}), 400
-
-    X = df[['device_id', 'success', 'status', 'message', 'challenge']]
-    
-    global model
-    model = IsolationForest(contamination=0.1)
-    model.fit(X)
-
-    logging.info("Model trained successfully for anomaly detection.")
-    return jsonify({"message": "Model trained successfully!"}), 200
 
 @app.route('/auth-attempts', methods=['GET'])
 def get_auth_attempts():
-    data = list(auth_attempts_collection.find({}, {'_id': 0}))
-    return jsonify(data), 200
+    # Retrieve all authentication attempts from the database
+    attempts = list(auth_attempts_collection.find({}))
+    for attempt in attempts:
+        attempt['_id'] = str(attempt['_id'])  # Convert ObjectId to string
+    return jsonify(attempts), 200
 
 if __name__ == '__main__':
-    app.run(debug=True) 
+    app.run(debug=True)
