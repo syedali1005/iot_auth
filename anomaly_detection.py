@@ -1,51 +1,50 @@
+import logging
 import pandas as pd
 from sklearn.ensemble import IsolationForest
-from sklearn.exceptions import NotFittedError
 
-# Initialize the IsolationForest model
-model = IsolationForest()
+model = None  # Global variable for the model
 
-def train_model(auth_attempts_collection):
-    """
-    Train the IsolationForest model with the data from the auth_attempts_collection.
-    """
-    # Fetch data from MongoDB
-    data = list(auth_attempts_collection.find({}, {'_id': 0}))  # Exclude _id from results
+def train_model(collection):
+    """Train the Isolation Forest model with authentication attempts data."""
+    data = list(collection.find({}, {'_id': 0, 'success': 1, 'device_id': 1}))
     df = pd.DataFrame(data)
 
-    # Check if there are enough records to train the model
-    if len(df) < 5:  # Set a threshold to ensure there is sufficient data
-        print("Not enough data to train the model.")
-        return False  # Return False to indicate that the model wasn't trained
+    # Log the size of the dataset
+    logging.info(f"Training model with {len(df)} records.")
 
-    # Ensure data types are correct
-    df['success'] = df['success'].astype(int)
+    if len(df) < 10:
+        logging.warning("Not enough data to train the model.")
+        return False
+
+    # Convert non-numeric fields to numeric
     df['device_id'] = pd.factorize(df['device_id'])[0]
 
-    # Prepare the features for training
     X = df[['device_id', 'success']]
-
-    # Train the model
+    
+    global model
+    model = IsolationForest(contamination=0.1)
     model.fit(X)
-    print("Model trained successfully.")
-    return True  # Return True to indicate successful training
+    logging.info("Model trained successfully.")
+    return True
 
-def monitor(data):
-    """
-    Monitor a new authentication attempt and detect if it's an anomaly.
-    """
-    input_data = pd.DataFrame({
-        'device_id': [data['device_id']],
-        'success': [data['success']],
-    })
-    input_data['device_id'] = pd.factorize(input_data['device_id'])[0]
+def monitor(new_attempt):
+    global model
 
-    # Check if the model is fitted
-    try:
-        # Use the model to predict if the input data is an anomaly
-        prediction = model.predict(input_data)
-        return prediction[0] == -1  # Return True if anomaly is detected
-    except NotFittedError:
-        print("The model is not fitted yet. Train the model first.")
-        return None  # Return None to indicate that no prediction was made
+    if model is None:
+        logging.warning("Model has not been trained.")
+        return False
 
+    # Log the new attempt
+    logging.info(f"Monitoring new attempt: {new_attempt}")
+
+    # Convert the new attempt to a DataFrame
+    attempt_df = pd.DataFrame([{
+        'device_id': new_attempt['device_id'],
+        'success': 1 if new_attempt['success'] else 0
+    }])
+    
+    attempt_df['device_id'] = pd.factorize(attempt_df['device_id'])[0]
+
+    prediction = model.predict(attempt_df)
+    logging.info(f"Prediction for new attempt {new_attempt}: {prediction}")
+    return prediction[0] == -1  # Anomaly is indicated by -1
